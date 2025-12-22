@@ -6,35 +6,92 @@ import pandas as pd
 import requests
 from google import genai
 
-START_DATE = datetime.strptime("2025-11-08", "%Y-%m-%d")
+START_DATE = datetime.strptime("2025-11-29", "%Y-%m-%d")
 PLAYER_COUNT_MINIMUM = 50
 # Top Percentage Place e.g. 0.25 -> 25%
-PLACING_PERCENTAGE = 0.25
+PLACING_PERCENTAGE = 0.50
 PLATFORM = "all"  # inperson
-DECKS = [
-    "gholdengo-lunatone",
-    "dragapult-dusknoir",
-    "charizard-pidgeot",
-    "gardevoir-ex-sv",
-    "mega-absol-box",
-    "gardevoir-jellicent",
-    "ceruledge-ex",
-    "grimmsnarl-froslass",
-    "n-zoroark",
-    "raging-bolt-ogerpon",
-    "tera-box",
-    "flareon-noctowl",
-    "alakazam-dudunsparce",
-    "joltik-box",
-]
+GAME = "PTCG"
+DIVISION = ["SR", "MA"]
+DATA_FOLDER = "pokemon_data"
 GEMINI_API_KEY = "AIzaSyBggEeoQFMVZj1NwJLnEVwwcNP1DfYylPI"
 
 # ==============================================================================
 # PART 1: DATA FETCHING AND CACHING
 # ==============================================================================
 
+# region Data Fetching
 
-def fetch_matchup_data(start_date, end_date):
+
+def slugify_archetypes(names: list[str]) -> list[str]:
+    """Convert a list of human-friendly archetype names to canonical slugs.
+
+    Rules:
+    - Lowercase
+    - Remove punctuation (apostrophes, periods)
+    - Replace spaces with dashes
+    - Collapse multiple dashes
+    - Apply a small mapping for known special cases
+
+    Returns a new list of slug strings in the same order.
+    """
+
+    if not names:
+        return []
+
+    mapping = {
+        "n zoroark": "n-zoroark",
+        "n's zoroark": "n-zoroark",
+        "gholdengo lunatone": "gholdengo-lunatone",
+        "gholdengo joltik box": "gholdengo-joltik-box",
+        "gholdengo joltik": "gholdengo-joltik-box",
+        "dragapult dusknoir": "dragapult-dusknoir",
+        "dragapult charizard": "dragapult-charizard",
+        "charizard pidgeot": "charizard-pidgeot",
+        "charizard noctowl": "charizard-noctowl",
+        "charizard noxtowl": "charizard-noctowl",
+        "gardevoir jellicent": "gardevoir-jellicent",
+        "gardevoir": "gardevoir-ex-sv",
+        "mega absol box": "mega-absol-box",
+        "mega venusaur ex": "mega-venusaur-ex",
+        "grimmsnarl froslass": "grimmsnarl-froslass",
+        "ceruledge": "ceruledge-ex",
+        "lopunny dusknoir": "lopunny-dusknoir",
+        "alakazam dudunsparce": "alakazam-dudunsparce",
+        "raging bolt ogerpon": "raging-bolt-ogerpon",
+        "tera box": "tera-box",
+        "kangaskhan bouffalant": "kangaskhan-bouffalant",
+        "sharpedo toxtricity": "sharpedo-toxtricity",
+        "flareon noctowl": "flareon-noctowl",
+        "joltik box": "joltik-box",
+        "ethan typhlosion": "ethan-typhlosion",
+        "mega venusaur": "mega-venusaur-ex",
+    }
+
+    slugs: list[str] = []
+    for n in names:
+        key = n.strip().lower()
+        if key in mapping:
+            slugs.append(mapping[key])
+            continue
+
+        # # Remove common possessives/apostrophes and periods
+        # s = key.replace("'", "").replace(".", "")
+        # # Replace ampersand with 'and'
+        # s = s.replace("&", "and")
+        # # Remove any characters that are not alphanumeric, whitespace or dash
+        # s = re.sub(r"[^\w\s-]", "", s)
+        # # Collapse whitespace to single dash
+        # s = re.sub(r"\s+", "-", s)
+        # # Collapse multiple dashes
+        # s = re.sub(r"-+", "-", s)
+        # s = s.strip("-")
+        # slugs.append(s)
+
+    return slugs
+
+
+def fetch_matchup_data(start_date, end_date, deck_list):
     """
     Fetches matchup data from TrainerHill for a given date range.
     Returns a raw pandas DataFrame.
@@ -43,9 +100,8 @@ def fetch_matchup_data(start_date, end_date):
 
     url = "https://www.trainerhill.com/_dash-update-component"
     headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        "referer": "https://www.trainerhill.com/meta?game=PTCG",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
     }
 
     # Payload now correctly uses the function's date arguments
@@ -61,11 +117,15 @@ def fetch_matchup_data(start_date, end_date):
                     "start_date": start_date,
                     "end_date": end_date,
                     "platform": PLATFORM,
-                    "game": "PTCG",
-                    "division": ["SR", "MA"],
+                    "game": GAME,
+                    "division": DIVISION,
                 },
             },
-            {"id": "meta-archetype-select", "property": "value", "value": DECKS},
+            {
+                "id": "meta-archetype-select",
+                "property": "value",
+                "value": slugify_archetypes(deck_list),
+            },
             {"id": "meta-placing", "property": "value", "value": PLACING_PERCENTAGE},
             {
                 "id": "meta-result-rate",
@@ -93,59 +153,44 @@ def fetch_matchup_data(start_date, end_date):
 
     except requests.exceptions.RequestException as e:
         logging.error(f"An error occurred during API request: {e}")
-        return None
+        return pd.DataFrame()
     except KeyError:
         logging.error("Could not find expected data in API response.")
-        return None
+        return pd.DataFrame()
 
 
 def post_deck_select_table(
-    players: int = 50,
-    start_date: str = "2025-11-29",
-    end_date: str = "2025-12-20",
-    platform: str = "all",
-    game: str = "PTCG",
-    division=None,
-    session: requests.Session | None = None,
-    timeout: int = 10,
-):
-    """Perform the same POST request shown in the curl example and return parsed JSON.
+    players: int = PLAYER_COUNT_MINIMUM,
+    start_date: str = START_DATE.strftime("%Y-%m-%d"),
+    end_date: str = datetime.now().strftime("%Y-%m-%d"),
+    platform: str = PLATFORM,
+    game: str = GAME,
+    division: list[str] = DIVISION,
+) -> list:
+    """Perform the deck-select POST and return a list of deck titles.
 
     Parameters:
-        players: Minimum players value (default 50)
+        players: Minimum players value (default PLAYER_COUNT_MINIMUM)
         start_date: YYYY-MM-DD start date
         end_date: YYYY-MM-DD end date
-        platform: platform filter (default "all")
-        game: game filter (default "PTCG")
-        division: list of divisions, defaults to ["JR","SR","MA"]
-        session: optional requests.Session to reuse cookies/headers
-        timeout: request timeout in seconds
+        platform: platform filter (default PLATFORM)
+        game: game filter (default GAME)
+        division: list of divisions, defaults to DIVISION
 
     Returns:
-        The response parsed as JSON on success, or None on error.
+        A list of deck titles
     """
-    if division is None:
-        division = ["JR", "SR", "MA"]
+
+    logging.debug(
+        f"Calling deck-select API for {start_date} to {end_date} (players={players})"
+    )
 
     url = "https://www.trainerhill.com/_dash-update-component"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
         "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "Referer": "https://www.trainerhill.com/decklist?game=PTCG",
         "Content-Type": "application/json",
-        # The curl contained X-CSRFToken: undefined; preserve it by default so behaviour matches the curl
-        "X-CSRFToken": "undefined",
+        "Referer": "https://www.trainerhill.com/meta?game=PTCG",
         "Origin": "https://www.trainerhill.com",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-GPC": "1",
-        "Priority": "u=4",
-        "TE": "trailers",
     }
 
     payload = {
@@ -156,11 +201,11 @@ def post_deck_select_table(
                 "id": "deck-select-tour-store",
                 "property": "data",
                 "value": {
-                    "players": players,
+                    "players": PLAYER_COUNT_MINIMUM,
                     "start_date": start_date,
                     "end_date": end_date,
-                    "platform": platform,
-                    "game": game,
+                    "platform": PLATFORM,
+                    "game": GAME,
                     "division": division,
                 },
             },
@@ -169,19 +214,52 @@ def post_deck_select_table(
         "changedPropIds": [],
         "parsedChangedPropsIds": [],
     }
+    logging.debug(f"Payload: {payload}")
 
-    sess = session or requests
     try:
-        resp = sess.post(url, headers=headers, json=payload, timeout=timeout)
+        resp = requests.post(url, headers=headers, json=payload)
         resp.raise_for_status()
-        # Return parsed JSON (may be nested like the curl response)
-        return resp.json()
+        response_data = resp.json()
+
+        logging.debug(f"Response: {response_data}")
+        # Extract 'title' from each entry in the children array (if present).
     except requests.exceptions.RequestException as e:
         logging.error(f"Error performing deck-select POST: {e}")
-        return None
+        return []
+
+    try:
+        deck_children = (
+            response_data.get("response", {})
+            .get("deck-select-table", {})
+            .get("children", {})
+            .get("props", {})
+            .get("children", [])
+        )
+        deck_titles = []
+        if isinstance(deck_children, list):
+            for child in deck_children[:20]:  # Limit to first 20 entries
+                try:
+                    title = child["props"]["children"][1]["props"]["children"]["props"][
+                        "children"
+                    ]["props"].get("title")
+                except (KeyError, TypeError, IndexError):
+                    title = None
+                if title is not None:
+                    deck_titles.append(title)
+        else:
+            logging.debug("Unexpected structure for deck children; expected list.")
+        logging.debug(f"Deck titles: {deck_titles}")
+
+        return deck_titles
+
+    except (KeyError, ValueError) as e:
+        logging.error(f"Could not parse deck-select response: {e}")
+        return []
 
 
-def get_weekly_data(week_start, week_end, is_current_week, folder="pokemon_data"):
+def get_weekly_data(
+    week_start, week_end, is_current_week, deck_list, folder="pokemon_data"
+):
     """
     Orchestrates fetching data for a week.
     If it's the current week, it re-fetches data. Otherwise, it uses the cache.
@@ -199,16 +277,20 @@ def get_weekly_data(week_start, week_end, is_current_week, folder="pokemon_data"
         logging.debug(f"Found local file for past week: {filename}. Loading from disk.")
         return pd.read_csv(filepath)
     else:
-        raw_df = fetch_matchup_data(week_start, week_end)
+        raw_df = fetch_matchup_data(week_start, week_end, deck_list)
         if raw_df is not None and not raw_df.empty:
             raw_df.to_csv(filepath, index=False)
             logging.debug(f"Saved data to {filepath}")
         return raw_df
 
 
+# endregion
+
 # ==============================================================================
 # PART 2: POWER RANKING ANALYSIS
 # ==============================================================================
+
+# region Power Ranking Analysis
 
 
 def run_power_analysis(df, title="FINAL POWER RANKINGS"):
@@ -254,9 +336,13 @@ def run_power_analysis(df, title="FINAL POWER RANKINGS"):
     return table_string
 
 
+# endregion
+
 # ==============================================================================
 # PART 3: GEMINI AI ANALYSIS
 # ==============================================================================
+
+# region AI Analysis
 
 
 def gemini_analysis(final_rankings_table):
@@ -300,14 +386,17 @@ def gemini_analysis(final_rankings_table):
         logging.error(f"\n\nAn error occurred during Gemini analysis: {e}")
 
 
+# endregion
+
 # ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
 
+# region Main
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    DATA_FOLDER = "pokemon_data"
     os.makedirs(DATA_FOLDER, exist_ok=True)
 
     start_date = START_DATE
@@ -332,8 +421,13 @@ if __name__ == "__main__":
 
         is_ongoing_week = week_start_dt <= today <= week_end_dt
 
+        deck_list = post_deck_select_table(
+            start_date=week_start_str,
+            end_date=week_end_str,
+        )
+
         weekly_raw_df = get_weekly_data(
-            week_start_str, week_end_str, is_ongoing_week, DATA_FOLDER
+            week_start_str, week_end_str, is_ongoing_week, deck_list, DATA_FOLDER
         )
 
         if weekly_raw_df is not None and not weekly_raw_df.empty:
@@ -358,3 +452,5 @@ if __name__ == "__main__":
 
     # if final_rankings_table:
     #     gemini_analysis(final_rankings_table)
+
+# endregion
