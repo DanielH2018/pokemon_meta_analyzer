@@ -22,75 +22,6 @@ GEMINI_API_KEY = "AIzaSyBggEeoQFMVZj1NwJLnEVwwcNP1DfYylPI"
 
 # region Data Fetching
 
-
-def slugify_archetypes(names: list[str]) -> list[str]:
-    """Convert a list of human-friendly archetype names to canonical slugs.
-
-    Rules:
-    - Lowercase
-    - Remove punctuation (apostrophes, periods)
-    - Replace spaces with dashes
-    - Collapse multiple dashes
-    - Apply a small mapping for known special cases
-
-    Returns a new list of slug strings in the same order.
-    """
-
-    if not names:
-        return []
-
-    mapping = {
-        "n zoroark": "n-zoroark",
-        "n's zoroark": "n-zoroark",
-        "gholdengo lunatone": "gholdengo-lunatone",
-        "gholdengo joltik box": "gholdengo-joltik-box",
-        "gholdengo joltik": "gholdengo-joltik-box",
-        "dragapult dusknoir": "dragapult-dusknoir",
-        "dragapult charizard": "dragapult-charizard",
-        "charizard pidgeot": "charizard-pidgeot",
-        "charizard noctowl": "charizard-noctowl",
-        "charizard noxtowl": "charizard-noctowl",
-        "gardevoir jellicent": "gardevoir-jellicent",
-        "gardevoir": "gardevoir-ex-sv",
-        "mega absol box": "mega-absol-box",
-        "mega venusaur ex": "mega-venusaur-ex",
-        "grimmsnarl froslass": "grimmsnarl-froslass",
-        "ceruledge": "ceruledge-ex",
-        "lopunny dusknoir": "lopunny-dusknoir",
-        "alakazam dudunsparce": "alakazam-dudunsparce",
-        "raging bolt ogerpon": "raging-bolt-ogerpon",
-        "tera box": "tera-box",
-        "kangaskhan bouffalant": "kangaskhan-bouffalant",
-        "sharpedo toxtricity": "sharpedo-toxtricity",
-        "flareon noctowl": "flareon-noctowl",
-        "joltik box": "joltik-box",
-        "ethan typhlosion": "ethan-typhlosion",
-        "mega venusaur": "mega-venusaur-ex",
-    }
-
-    slugs: list[str] = []
-    for n in names:
-        key = n.strip().lower()
-        if key in mapping:
-            slugs.append(mapping[key])
-            continue
-
-        # # Remove common possessives/apostrophes and periods
-        # s = key.replace("'", "").replace(".", "")
-        # # Replace ampersand with 'and'
-        # s = s.replace("&", "and")
-        # # Remove any characters that are not alphanumeric, whitespace or dash
-        # s = re.sub(r"[^\w\s-]", "", s)
-        # # Collapse whitespace to single dash
-        # s = re.sub(r"\s+", "-", s)
-        # # Collapse multiple dashes
-        # s = re.sub(r"-+", "-", s)
-        # s = s.strip("-")
-        # slugs.append(s)
-
-    return slugs
-
-
 def fetch_matchup_data(start_date, end_date, deck_list):
     """
     Fetches matchup data from TrainerHill for a given date range.
@@ -124,7 +55,7 @@ def fetch_matchup_data(start_date, end_date, deck_list):
             {
                 "id": "meta-archetype-select",
                 "property": "value",
-                "value": slugify_archetypes(deck_list),
+                "value": deck_list,
             },
             {"id": "meta-placing", "property": "value", "value": PLACING_PERCENTAGE},
             {
@@ -159,7 +90,7 @@ def fetch_matchup_data(start_date, end_date, deck_list):
         return pd.DataFrame()
 
 
-def post_deck_select_table(
+def get_deck_slugs(
     players: int = PLAYER_COUNT_MINIMUM,
     start_date: str = START_DATE.strftime("%Y-%m-%d"),
     end_date: str = datetime.now().strftime("%Y-%m-%d"),
@@ -189,16 +120,17 @@ def post_deck_select_table(
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "Referer": "https://www.trainerhill.com/meta?game=PTCG",
-        "Origin": "https://www.trainerhill.com",
     }
 
     payload = {
-        "output": "deck-select-table.children",
-        "outputs": {"id": "deck-select-table", "property": "children"},
+        "output": "..meta-archetype-select.options...meta-archetype-store.data..",
+        "outputs": [
+            {"id": "meta-archetype-select", "property": "options"},
+            {"id": "meta-archetype-store", "property": "data"},
+        ],
         "inputs": [
             {
-                "id": "deck-select-tour-store",
+                "id": "meta-tour-store",
                 "property": "data",
                 "value": {
                     "players": PLAYER_COUNT_MINIMUM,
@@ -208,8 +140,7 @@ def post_deck_select_table(
                     "game": GAME,
                     "division": division,
                 },
-            },
-            {"id": "deck-select-search", "property": "value"},
+            }
         ],
         "changedPropIds": [],
         "parsedChangedPropsIds": [],
@@ -230,27 +161,23 @@ def post_deck_select_table(
     try:
         deck_children = (
             response_data.get("response", {})
-            .get("deck-select-table", {})
-            .get("children", {})
-            .get("props", {})
-            .get("children", [])
+            .get("meta-archetype-store", {})
+            .get("data", {})
         )
-        deck_titles = []
+        deck_ids = []
         if isinstance(deck_children, list):
             for child in deck_children[:20]:  # Limit to first 20 entries
                 try:
-                    title = child["props"]["children"][1]["props"]["children"]["props"][
-                        "children"
-                    ]["props"].get("title")
+                    deck_id = child.get("id", {})
                 except (KeyError, TypeError, IndexError):
-                    title = None
-                if title is not None:
-                    deck_titles.append(title)
+                    deck_id = None
+                if deck_id is not None:
+                    deck_ids.append(deck_id)
         else:
             logging.debug("Unexpected structure for deck children; expected list.")
-        logging.debug(f"Deck titles: {deck_titles}")
+        logging.debug(f"Deck IDs: {deck_ids}")
 
-        return deck_titles
+        return deck_ids
 
     except (KeyError, ValueError) as e:
         logging.error(f"Could not parse deck-select response: {e}")
@@ -421,7 +348,7 @@ if __name__ == "__main__":
 
         is_ongoing_week = week_start_dt <= today <= week_end_dt
 
-        deck_list = post_deck_select_table(
+        deck_list = get_deck_slugs(
             start_date=week_start_str,
             end_date=week_end_str,
         )
