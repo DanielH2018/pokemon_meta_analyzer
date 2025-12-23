@@ -1,0 +1,33 @@
+# ruff.toml
+
+# Same as Black.
+line-length = 88
+indent-width = 4
+
+target-version = "py312"
+
+[lint]
+# Enable specific rule sets:
+# E/W = pycodestyle (standard linting)
+# F   = Pyflakes (finds actual errors)
+# I   = isort (sorts imports automatically)
+# B   = flake8-bugbear (finds likely bugs/pitfalls)
+# UP  = pyupgrade (rewrites old syntax to modern Python)
+select = ["E", "W", "F", "I", "B", "UP"]
+
+# Ignore specific rules if needed:
+# E501: Line too long (handled by formatter)
+ignore = ["E501"]
+
+[format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, not tabs.
+indent-style = "space"
+
+# Respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Automatically detect the appropriate line ending.
+line-ending = "auto"
