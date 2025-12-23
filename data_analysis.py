@@ -191,13 +191,14 @@ def get_deck_slugs(
 ) -> list[str]:
     """Perform the deck-select POST and return a list of deck titles.
 
-    Parameters:
+    Args:
         players: Minimum players value (default PLAYER_COUNT_MINIMUM)
         start_date: YYYY-MM-DD start date
         end_date: YYYY-MM-DD end date
         platform: platform filter (default PLATFORM)
         game: game filter (default GAME)
         division: list of divisions, defaults to DIVISION
+        event: Optional WideEvent instance for logging.
 
     Returns:
         A list of deck titles
@@ -289,10 +290,21 @@ def get_time_slice_data(
     deck_list,
     folder="pokemon_data",
     event=None,
-):
+) -> pd.DataFrame:
     """Orchestrates fetching data for a time slice.
 
     If it's the current time slice, it re-fetches data. Otherwise, it uses the cache.
+
+    Args:
+        time_slice_start: Start date of the time slice in YYYY-MM-DD format.
+        time_slice_end: End date of the time slice in YYYY-MM-DD format.
+        is_current_time_slice: Boolean indicating if this is the current time slice.
+        deck_list: List of deck slugs to fetch data for.
+        folder: Folder to save and load data from.
+        event: Optional WideEvent instance for logging.
+
+    Returns:
+        A pandas DataFrame containing the fetched or cached data.
     """
     filename = f"data_{time_slice_start}_to_{time_slice_end}.csv"
     filepath = os.path.join(folder, filename)
@@ -336,6 +348,14 @@ def run_power_analysis(df, title="FINAL POWER RANKINGS", event=None):
     """Executes the iterative power ranking algorithm.
 
     Logs the result and returns the ranking table as a string.
+
+    Args:
+        df: A pandas DataFrame containing the matchup data.
+        title: Title of the analysis (default is "FINAL POWER RANKINGS").
+        event: Optional WideEvent instance for logging.
+
+    Returns:
+        A string representation of the power rankings table.
     """
     if df.empty:
         logging.warning(f"Skipping analysis for '{title}' due to no data.")
