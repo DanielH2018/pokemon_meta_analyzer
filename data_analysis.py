@@ -1,10 +1,14 @@
+import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
 from google import genai
+
+# Constants
 
 START_DATE = datetime.strptime("2025-11-29", "%Y-%m-%d")
 PLAYER_COUNT_MINIMUM = 50
@@ -16,13 +20,68 @@ DIVISION = ["SR", "MA"]
 DATA_FOLDER = "pokemon_data"
 GEMINI_API_KEY = "AIzaSyBggEeoQFMVZj1NwJLnEVwwcNP1DfYylPI"
 
+
+# region Logging Setup
+
+# ==============================================================================
+# LOGGING SETUP
+# ==============================================================================
+
+
+class WideEvent:
+    """
+    A simple 'Flight Recorder'. It gathers data as the script runs
+    and prints one JSON summary at the end.
+    """
+
+    def __init__(self, script_name):
+        self.data = {
+            "script": script_name,
+            "timestamp": time.time(),
+            "status": "success",
+        }
+        self.start_time = time.time()
+
+    def add(self, **kwargs):
+        """Add any info you want to track."""
+        self.data.update(kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # 1. Calculate how long the script took
+        duration = (time.time() - self.start_time) * 1000
+        self.data["duration_ms"] = round(duration, 2)
+
+        # 2. If it crashed, capture why
+        if exc_type:
+            self.data["status"] = "failed"
+            self.data["error"] = str(exc_value)
+            self.data["error_type"] = exc_type.__name__
+
+        # 3. Print the single wide event
+        print(json.dumps(self.data))
+
+        # Allow the crash to actually stop the script (don't suppress it)
+        return False
+
+
+# endregion
+
+
 # ==============================================================================
 # PART 1: DATA FETCHING AND CACHING
 # ==============================================================================
 
 # region Data Fetching
 
-def fetch_matchup_data(start_date, end_date, deck_list):
+
+def fetch_matchup_data(
+    deck_list: list[str],
+    start_date: str,
+    end_date: str = datetime.now().strftime("%Y-%m-%d"),
+) -> pd.DataFrame:
     """
     Fetches matchup data from TrainerHill for a given date range.
     Returns a raw pandas DataFrame.
@@ -97,7 +156,7 @@ def get_deck_slugs(
     platform: str = PLATFORM,
     game: str = GAME,
     division: list[str] = DIVISION,
-) -> list:
+) -> list[str]:
     """Perform the deck-select POST and return a list of deck titles.
 
     Parameters:
@@ -174,7 +233,7 @@ def get_deck_slugs(
                 if deck_id is not None:
                     deck_ids.append(deck_id)
         else:
-            logging.debug("Unexpected structure for deck children; expected list.")
+            logging.debug("Unexpected structure for deck ids; expected list.")
         logging.debug(f"Deck IDs: {deck_ids}")
 
         return deck_ids
@@ -322,62 +381,62 @@ def gemini_analysis(final_rankings_table):
 # region Main
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    with WideEvent("pokemon_matchup_analysis") as event:
+        event.add(script_name="pokemon_matchup_analysis")
+        os.makedirs(DATA_FOLDER, exist_ok=True)
 
-    os.makedirs(DATA_FOLDER, exist_ok=True)
+        start_date = START_DATE
+        end_date = datetime.now()
 
-    start_date = START_DATE
-    end_date = datetime.now()
+        current_date = start_date
+        all_weekly_dfs = []
 
-    current_date = start_date
-    all_weekly_dfs = []
+        today = datetime.now()
+        aggregated_df_summed = pd.DataFrame()
 
-    today = datetime.now()
-    aggregated_df_summed = pd.DataFrame()
+        while current_date <= end_date:
+            week_start_dt = current_date
+            week_end_dt = current_date + timedelta(days=6)
 
-    while current_date <= end_date:
-        week_start_dt = current_date
-        week_end_dt = current_date + timedelta(days=6)
+            week_start_str = week_start_dt.strftime("%Y-%m-%d")
+            week_end_str = week_end_dt.strftime("%Y-%m-%d")
 
-        week_start_str = week_start_dt.strftime("%Y-%m-%d")
-        week_end_str = week_end_dt.strftime("%Y-%m-%d")
-
-        logging.debug(
-            f"{'=' * 25} PROCESSING WEEK: {week_start_str} to {week_end_str} {'=' * 25}"
-        )
-
-        is_ongoing_week = week_start_dt <= today <= week_end_dt
-
-        deck_list = get_deck_slugs(
-            start_date=week_start_str,
-            end_date=week_end_str,
-        )
-
-        weekly_raw_df = get_weekly_data(
-            week_start_str, week_end_str, is_ongoing_week, deck_list, DATA_FOLDER
-        )
-
-        if weekly_raw_df is not None and not weekly_raw_df.empty:
-            all_weekly_dfs.append(weekly_raw_df)
-            run_power_analysis(
-                weekly_raw_df.copy(),
-                f"RANKINGS FOR WEEK: {week_start_str} to {week_end_str}",
+            logging.debug(
+                f"{'=' * 25} PROCESSING WEEK: {week_start_str} to {week_end_str} {'=' * 25}"
             )
 
-            aggregated_df = pd.concat(all_weekly_dfs, ignore_index=True)
-            aggregated_df_summed = (
-                aggregated_df.groupby(["deck1", "deck2"]).sum().reset_index()
+            is_ongoing_week = week_start_dt <= today <= week_end_dt
+
+            deck_list = get_deck_slugs(
+                start_date=week_start_str,
+                end_date=week_end_str,
             )
 
-        current_date += timedelta(days=7)
+            weekly_raw_df = get_weekly_data(
+                week_start_str, week_end_str, is_ongoing_week, deck_list, DATA_FOLDER
+            )
 
-    # Final aggregate analysis for the entire period
-    final_rankings_table = run_power_analysis(
-        aggregated_df_summed.copy(),
-        f"AGGREGATE RANKINGS UP TO: {end_date.strftime('%Y-%m-%d')}",
-    )
+            if weekly_raw_df is not None and not weekly_raw_df.empty:
+                all_weekly_dfs.append(weekly_raw_df)
+                run_power_analysis(
+                    weekly_raw_df.copy(),
+                    f"RANKINGS FOR WEEK: {week_start_str} to {week_end_str}",
+                )
 
-    # if final_rankings_table:
-    #     gemini_analysis(final_rankings_table)
+                aggregated_df = pd.concat(all_weekly_dfs, ignore_index=True)
+                aggregated_df_summed = (
+                    aggregated_df.groupby(["deck1", "deck2"]).sum().reset_index()
+                )
+
+            current_date += timedelta(days=7)
+
+        # Final aggregate analysis for the entire period
+        final_rankings_table = run_power_analysis(
+            aggregated_df_summed.copy(),
+            f"AGGREGATE RANKINGS UP TO: {end_date.strftime('%Y-%m-%d')}",
+        )
+
+        # if final_rankings_table:
+        #     gemini_analysis(final_rankings_table)
 
 # endregion
