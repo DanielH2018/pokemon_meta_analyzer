@@ -1,3 +1,5 @@
+"""Run Data Analysis on Pokemon TCG Matchup Data."""
+
 import json
 import logging
 import os
@@ -37,12 +39,17 @@ logging.basicConfig(
 
 
 class WideEvent:
-    """
-    A simple 'Flight Recorder'. It gathers data as the script runs
-    and prints one JSON summary at the end.
+    """A simple 'Flight Recorder'.
+
+    It gathers data as the script runs and prints one JSON summary at the end.
     """
 
     def __init__(self, script_name):
+        """Initialize a WideEvent instance with a script name.
+
+        Args:
+            script_name: The name of the script being tracked.
+        """
         self.data = {
             "script": script_name,
             "timestamp": time.time(),
@@ -55,9 +62,17 @@ class WideEvent:
         self.data.update(kwargs)
 
     def __enter__(self):
+        """Enter the context manager."""
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        """Exit the context manager and log the event summary.
+
+        Args:
+            exc_type: The exception type if an exception occurred.
+            exc_value: The exception value if an exception occurred.
+            traceback: The traceback if an exception occurred.
+        """
         # 1. Calculate how long the script took
         duration = (time.time() - self.start_time) * 1000
         self.data["duration_ms"] = round(duration, 2)
@@ -91,9 +106,16 @@ def fetch_matchup_data(
     end_date: str = datetime.now().strftime("%Y-%m-%d"),
     event: WideEvent = None,
 ) -> pd.DataFrame | None:
-    """
-    Fetches matchup data from TrainerHill for a given date range.
-    Returns a raw pandas DataFrame.
+    """Fetches matchup data from TrainerHill for a given date range.
+
+    Args:
+        deck_list: List of deck slugs to fetch data for.
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date in YYYY-MM-DD format (default is today).
+        event: Optional WideEvent instance for logging.
+
+    Returns:
+        A raw pandas DataFrame or None on error.
     """
     logging.info(f"Calling API to fetch data from {start_date} to {end_date}...")
 
@@ -180,7 +202,6 @@ def get_deck_slugs(
     Returns:
         A list of deck titles
     """
-
     logging.info(f"Calling deck-select API for {start_date} to {end_date})")
 
     url = "https://www.trainerhill.com/_dash-update-component"
@@ -269,8 +290,8 @@ def get_time_slice_data(
     folder="pokemon_data",
     event=None,
 ):
-    """
-    Orchestrates fetching data for a time slice.
+    """Orchestrates fetching data for a time slice.
+
     If it's the current time slice, it re-fetches data. Otherwise, it uses the cache.
     """
     filename = f"data_{time_slice_start}_to_{time_slice_end}.csv"
@@ -312,8 +333,8 @@ def get_time_slice_data(
 
 
 def run_power_analysis(df, title="FINAL POWER RANKINGS", event=None):
-    """
-    Executes the iterative power ranking algorithm.
+    """Executes the iterative power ranking algorithm.
+
     Logs the result and returns the ranking table as a string.
     """
     if df.empty:
@@ -371,6 +392,16 @@ def run_power_analysis(df, title="FINAL POWER RANKINGS", event=None):
 
 
 def gemini_analysis(final_rankings_table):
+    """Analyzes Pokémon meta-game rankings using Gemini AI.
+
+    Sends the power rankings table to the Gemini API for analysis and logs
+    insights about the current meta-game state, including top decks, sleepers,
+    and overall meta health.
+
+    Args:
+        final_rankings_table: A string containing the formatted power rankings
+            table to be analyzed.
+    """
     try:
         # Configure the Gemini client with the API key from environment variables
         # The client gets the API key from the environment variable `GEMINI_API_KEY`.
