@@ -424,8 +424,11 @@ if __name__ == "__main__":
         event.add(script_name="pokemon_matchup_analysis")
         os.makedirs(DATA_FOLDER, exist_ok=True)
 
+        # Create Date Time Range
         start_date_dt = START_DATE
         end_date_dt = datetime.now()
+
+        # Add date range to the event for tracking
         event.add(
             date_range_start=start_date_dt.strftime("%Y-%m-%d"),
             date_range_end=end_date_dt.strftime("%Y-%m-%d"),
@@ -434,7 +437,6 @@ if __name__ == "__main__":
         time_slice_start_dt = start_date_dt
         all_dfs = []
 
-        today = datetime.now()
         aggregated_df_summed = pd.DataFrame()
         time_periods_processed = 0
         total_rows_fetched = 0
@@ -442,24 +444,24 @@ if __name__ == "__main__":
         while time_slice_start_dt <= end_date_dt:
             time_slice_end_dt = time_slice_start_dt + timedelta(days=6)
 
-            time_splice_start_str = time_slice_start_dt.strftime("%Y-%m-%d")
-            time_splice_end_str = time_slice_end_dt.strftime("%Y-%m-%d")
+            time_slice_start_str = time_slice_start_dt.strftime("%Y-%m-%d")
+            time_slice_end_str = time_slice_end_dt.strftime("%Y-%m-%d")
 
             logging.info(
-                f"{'=' * 25} PROCESSING TIME: {time_splice_start_str} to {time_splice_end_str} {'=' * 25}"
+                f"{'=' * 25} PROCESSING TIME: {time_slice_start_str} to {time_slice_end_str} {'=' * 25}"
             )
 
-            is_ongoing_time = time_slice_start_dt <= today <= time_slice_end_dt
+            is_ongoing_time = time_slice_start_dt <= end_date_dt <= time_slice_end_dt
 
             deck_list = get_deck_slugs(
-                start_date=time_splice_start_str,
-                end_date=time_splice_end_str,
+                start_date=time_slice_start_str,
+                end_date=time_slice_end_str,
                 event=event,
             )
 
             raw_df = get_time_slice_data(
-                time_splice_start_str,
-                time_splice_end_str,
+                time_slice_start_str,
+                time_slice_end_str,
                 is_ongoing_time,
                 deck_list,
                 DATA_FOLDER,
@@ -472,7 +474,7 @@ if __name__ == "__main__":
                 time_periods_processed += 1
                 run_power_analysis(
                     raw_df.copy(),
-                    f"RANKINGS FOR TIME SLICE: {time_splice_start_str} to {time_splice_end_str}",
+                    f"RANKINGS FOR TIME SLICE: {time_slice_start_str} to {time_slice_end_str}",
                     event=event,
                 )
 
