@@ -423,7 +423,7 @@ def gemini_analysis(final_rankings_table):
         ---
 
         Provide your analysis now.
-        """
+        """  # noqa: E501
 
         logging.info("\n\n{'='*20} 🤖 GEMINI META ANALYSIS 🤖 {'='*20}")
 
@@ -433,11 +433,6 @@ def gemini_analysis(final_rankings_table):
         )
 
         logging.info(response.text)
-
-    except ImportError:
-        logging.warning(
-            "\n\nCould not perform AI analysis. Please install the Gemini client: pip install google-generativeai"
-        )
     except Exception as e:
         logging.error(f"\n\nAn error occurred during Gemini analysis: {e}")
 
@@ -481,7 +476,8 @@ if __name__ == "__main__":
             time_slice_end_str = time_slice_end_dt.strftime("%Y-%m-%d")
 
             logging.info(
-                f"{'=' * 25} PROCESSING TIME: {time_slice_start_str} to {time_slice_end_str} {'=' * 25}"
+                f"{'=' * 25} PROCESSING TIME: {time_slice_start_str} to "
+                f"{time_slice_end_str} {'=' * 25}"
             )
 
             # Check if the current time slice includes the end date
@@ -509,9 +505,13 @@ if __name__ == "__main__":
                 all_dfs.append(raw_df)
                 total_rows_fetched += len(raw_df)
                 time_periods_processed += 1
+                time_slice_label = (
+                    f"RANKINGS FOR TIME SLICE: {time_slice_start_str} to "
+                    f"{time_slice_end_str}"
+                )
                 run_power_analysis(
                     raw_df.copy(),
-                    f"RANKINGS FOR TIME SLICE: {time_slice_start_str} to {time_slice_end_str}",
+                    time_slice_label,
                     event=event,
                 )
 
