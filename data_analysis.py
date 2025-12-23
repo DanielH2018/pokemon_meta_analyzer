@@ -18,6 +18,8 @@ PLATFORM = "all"  # inperson
 GAME = "PTCG"
 DIVISION = ["SR", "MA"]
 DATA_FOLDER = "pokemon_data"
+# Number of days to process at a time - 1
+TIME_SLICE = 6
 GEMINI_API_KEY = "AIzaSyBggEeoQFMVZj1NwJLnEVwwcNP1DfYylPI"
 
 
@@ -26,6 +28,12 @@ GEMINI_API_KEY = "AIzaSyBggEeoQFMVZj1NwJLnEVwwcNP1DfYylPI"
 # ==============================================================================
 # LOGGING SETUP
 # ==============================================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s\n",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 
 class WideEvent:
@@ -61,7 +69,7 @@ class WideEvent:
             self.data["error_type"] = exc_type.__name__
 
         # 3. Print the single wide event
-        print(json.dumps(self.data))
+        print(json.dumps(self.data, indent=4))
 
         # Allow the crash to actually stop the script (don't suppress it)
         return False
@@ -81,12 +89,13 @@ def fetch_matchup_data(
     deck_list: list[str],
     start_date: str,
     end_date: str = datetime.now().strftime("%Y-%m-%d"),
-) -> pd.DataFrame:
+    event: WideEvent = None,
+) -> pd.DataFrame | None:
     """
     Fetches matchup data from TrainerHill for a given date range.
     Returns a raw pandas DataFrame.
     """
-    logging.debug(f"Calling API to fetch data from {start_date} to {end_date}...")
+    logging.info(f"Calling API to fetch data from {start_date} to {end_date}...")
 
     url = "https://www.trainerhill.com/_dash-update-component"
     headers = {
@@ -135,18 +144,18 @@ def fetch_matchup_data(
         matchup_list = response_data["response"]["meta-matchup-data-store"]["data"]
 
         if isinstance(matchup_list, list) and matchup_list:
-            logging.debug("API call successful!")
+            logging.info("API call successful!")
             return pd.DataFrame(matchup_list)
         else:
             logging.warning("No data returned from API for this period.")
-            return pd.DataFrame()  # Return empty DataFrame
+            return None  # Return empty DataFrame
 
     except requests.exceptions.RequestException as e:
         logging.error(f"An error occurred during API request: {e}")
-        return pd.DataFrame()
+        return None
     except KeyError:
         logging.error("Could not find expected data in API response.")
-        return pd.DataFrame()
+        return None
 
 
 def get_deck_slugs(
@@ -156,6 +165,7 @@ def get_deck_slugs(
     platform: str = PLATFORM,
     game: str = GAME,
     division: list[str] = DIVISION,
+    event=None,
 ) -> list[str]:
     """Perform the deck-select POST and return a list of deck titles.
 
@@ -171,9 +181,7 @@ def get_deck_slugs(
         A list of deck titles
     """
 
-    logging.debug(
-        f"Calling deck-select API for {start_date} to {end_date} (players={players})"
-    )
+    logging.info(f"Calling deck-select API for {start_date} to {end_date})")
 
     url = "https://www.trainerhill.com/_dash-update-component"
     headers = {
@@ -206,15 +214,17 @@ def get_deck_slugs(
     }
     logging.debug(f"Payload: {payload}")
 
+    op_start = time.time()
     try:
         resp = requests.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         response_data = resp.json()
 
-        logging.debug(f"Response: {response_data}")
-        # Extract 'title' from each entry in the children array (if present).
+        # logging.debug(f"Response: {response_data}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Error performing deck-select POST: {e}")
+        if event:
+            event.add(deck_slugs_fetch_failed=True, deck_slugs_error=str(e))
         return []
 
     try:
@@ -233,40 +243,62 @@ def get_deck_slugs(
                 if deck_id is not None:
                     deck_ids.append(deck_id)
         else:
-            logging.debug("Unexpected structure for deck ids; expected list.")
+            logging.warning("Unexpected structure for deck ids; expected list.")
         logging.debug(f"Deck IDs: {deck_ids}")
+        op_duration = (time.time() - op_start) * 1000
+        if event:
+            event.add(
+                deck_ids_count=len(deck_ids),
+                deck_ids_fetch_duration_ms=round(op_duration, 2),
+            )
 
         return deck_ids
 
     except (KeyError, ValueError) as e:
         logging.error(f"Could not parse deck-select response: {e}")
+        if event:
+            event.add(deck_slugs_parse_failed=True, deck_slugs_parse_error=str(e))
         return []
 
 
-def get_weekly_data(
-    week_start, week_end, is_current_week, deck_list, folder="pokemon_data"
+def get_time_slice_data(
+    time_slice_start,
+    time_slice_end,
+    is_current_time_slice,
+    deck_list,
+    folder="pokemon_data",
+    event=None,
 ):
     """
-    Orchestrates fetching data for a week.
-    If it's the current week, it re-fetches data. Otherwise, it uses the cache.
+    Orchestrates fetching data for a time slice.
+    If it's the current time slice, it re-fetches data. Otherwise, it uses the cache.
     """
-    filename = f"data_{week_start}_to_{week_end}.csv"
+    filename = f"data_{time_slice_start}_to_{time_slice_end}.csv"
     filepath = os.path.join(folder, filename)
 
-    if is_current_week and os.path.exists(filepath):
-        logging.debug(
-            f"Current week detected. Removing stale file to re-fetch: {filename}"
+    if is_current_time_slice and os.path.exists(filepath):
+        logging.info(
+            f"Current time slice detected. Removing stale file to re-fetch: {filename}"
         )
         os.remove(filepath)
 
     if os.path.exists(filepath):
-        logging.debug(f"Found local file for past week: {filename}. Loading from disk.")
-        return pd.read_csv(filepath)
+        logging.info(
+            f"Found local file for past time slice: {filename}. Loading from disk."
+        )
+        df = pd.read_csv(filepath)
+        if event:
+            event.add(**{f"time_slice_data_{time_slice_start}_from_cache": True})
+        return df
     else:
-        raw_df = fetch_matchup_data(week_start, week_end, deck_list)
+        raw_df = fetch_matchup_data(deck_list, time_slice_start, time_slice_end, event)
         if raw_df is not None and not raw_df.empty:
             raw_df.to_csv(filepath, index=False)
-            logging.debug(f"Saved data to {filepath}")
+            logging.info(f"Saved data to {filepath}")
+            if event:
+                event.add(
+                    **{f"time_slice_data_{time_slice_start}_rows_fetched": len(raw_df)}
+                )
         return raw_df
 
 
@@ -279,13 +311,15 @@ def get_weekly_data(
 # region Power Ranking Analysis
 
 
-def run_power_analysis(df, title="FINAL POWER RANKINGS"):
+def run_power_analysis(df, title="FINAL POWER RANKINGS", event=None):
     """
     Executes the iterative power ranking algorithm.
     Logs the result and returns the ranking table as a string.
     """
     if df.empty:
         logging.warning(f"Skipping analysis for '{title}' due to no data.")
+        if event:
+            event.add(power_analysis_empty_data=True)
         return None  # Return None if no data
 
     all_decks = pd.unique(df[["deck1", "deck2"]].values.ravel("K"))
@@ -317,6 +351,11 @@ def run_power_analysis(df, title="FINAL POWER RANKINGS"):
     table_string = summary_df.head(15).to_string()
 
     logging.info(f"\n{'=' * 50}\n {title}\n{'=' * 50}\n{table_string}")
+
+    if event:
+        event.add(
+            power_analysis_decks_analyzed=len(all_decks), power_analysis_iterations=20
+        )
 
     # Return the table string for external use (like the AI prompt)
     return table_string
@@ -385,55 +424,77 @@ if __name__ == "__main__":
         event.add(script_name="pokemon_matchup_analysis")
         os.makedirs(DATA_FOLDER, exist_ok=True)
 
-        start_date = START_DATE
-        end_date = datetime.now()
+        start_date_dt = START_DATE
+        end_date_dt = datetime.now()
+        event.add(
+            date_range_start=start_date_dt.strftime("%Y-%m-%d"),
+            date_range_end=end_date_dt.strftime("%Y-%m-%d"),
+        )
 
-        current_date = start_date
-        all_weekly_dfs = []
+        time_slice_start_dt = start_date_dt
+        all_dfs = []
 
         today = datetime.now()
         aggregated_df_summed = pd.DataFrame()
+        time_periods_processed = 0
+        total_rows_fetched = 0
 
-        while current_date <= end_date:
-            week_start_dt = current_date
-            week_end_dt = current_date + timedelta(days=6)
+        while time_slice_start_dt <= end_date_dt:
+            time_slice_end_dt = time_slice_start_dt + timedelta(days=6)
 
-            week_start_str = week_start_dt.strftime("%Y-%m-%d")
-            week_end_str = week_end_dt.strftime("%Y-%m-%d")
+            time_splice_start_str = time_slice_start_dt.strftime("%Y-%m-%d")
+            time_splice_end_str = time_slice_end_dt.strftime("%Y-%m-%d")
 
-            logging.debug(
-                f"{'=' * 25} PROCESSING WEEK: {week_start_str} to {week_end_str} {'=' * 25}"
+            logging.info(
+                f"{'=' * 25} PROCESSING TIME: {time_splice_start_str} to {time_splice_end_str} {'=' * 25}"
             )
 
-            is_ongoing_week = week_start_dt <= today <= week_end_dt
+            is_ongoing_time = time_slice_start_dt <= today <= time_slice_end_dt
 
             deck_list = get_deck_slugs(
-                start_date=week_start_str,
-                end_date=week_end_str,
+                start_date=time_splice_start_str,
+                end_date=time_splice_end_str,
+                event=event,
             )
 
-            weekly_raw_df = get_weekly_data(
-                week_start_str, week_end_str, is_ongoing_week, deck_list, DATA_FOLDER
+            raw_df = get_time_slice_data(
+                time_splice_start_str,
+                time_splice_end_str,
+                is_ongoing_time,
+                deck_list,
+                DATA_FOLDER,
+                event=event,
             )
 
-            if weekly_raw_df is not None and not weekly_raw_df.empty:
-                all_weekly_dfs.append(weekly_raw_df)
+            if raw_df is not None and not raw_df.empty:
+                all_dfs.append(raw_df)
+                total_rows_fetched += len(raw_df)
+                time_periods_processed += 1
                 run_power_analysis(
-                    weekly_raw_df.copy(),
-                    f"RANKINGS FOR WEEK: {week_start_str} to {week_end_str}",
+                    raw_df.copy(),
+                    f"RANKINGS FOR TIME SLICE: {time_splice_start_str} to {time_splice_end_str}",
+                    event=event,
                 )
 
-                aggregated_df = pd.concat(all_weekly_dfs, ignore_index=True)
+                aggregated_df = pd.concat(all_dfs, ignore_index=True)
                 aggregated_df_summed = (
                     aggregated_df.groupby(["deck1", "deck2"]).sum().reset_index()
                 )
 
-            current_date += timedelta(days=7)
+            time_slice_start_dt += timedelta(days=7)
 
         # Final aggregate analysis for the entire period
         final_rankings_table = run_power_analysis(
             aggregated_df_summed.copy(),
-            f"AGGREGATE RANKINGS UP TO: {end_date.strftime('%Y-%m-%d')}",
+            f"AGGREGATE RANKINGS UP TO: {end_date_dt.strftime('%Y-%m-%d')}",
+            event=event,
+        )
+
+        # Add summary metrics to the event
+        event.add(
+            time_periods_processed=time_periods_processed,
+            total_rows_fetched=total_rows_fetched,
+            final_analysis_generated=final_rankings_table is not None,
         )
 
         # if final_rankings_table:
