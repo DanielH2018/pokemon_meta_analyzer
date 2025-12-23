@@ -434,16 +434,18 @@ if __name__ == "__main__":
             date_range_end=end_date_dt.strftime("%Y-%m-%d"),
         )
 
+        # Initialize variables for time slicing and data aggregation
         time_slice_start_dt = start_date_dt
         all_dfs = []
-
         aggregated_df_summed = pd.DataFrame()
         time_periods_processed = 0
         total_rows_fetched = 0
 
         while time_slice_start_dt <= end_date_dt:
+            # Define the time slice for this iteration
             time_slice_end_dt = time_slice_start_dt + timedelta(days=6)
 
+            # Format to YYYY-MM-DD format for API calls and logging
             time_slice_start_str = time_slice_start_dt.strftime("%Y-%m-%d")
             time_slice_end_str = time_slice_end_dt.strftime("%Y-%m-%d")
 
@@ -451,14 +453,17 @@ if __name__ == "__main__":
                 f"{'=' * 25} PROCESSING TIME: {time_slice_start_str} to {time_slice_end_str} {'=' * 25}"
             )
 
+            # Check if the current time slice includes the end date
             is_ongoing_time = time_slice_start_dt <= end_date_dt <= time_slice_end_dt
 
+            # Fetch deck slugs for the current time slice
             deck_list = get_deck_slugs(
                 start_date=time_slice_start_str,
                 end_date=time_slice_end_str,
                 event=event,
             )
 
+            # Fetch data for the current time slice
             raw_df = get_time_slice_data(
                 time_slice_start_str,
                 time_slice_end_str,
@@ -468,6 +473,7 @@ if __name__ == "__main__":
                 event=event,
             )
 
+            # Process the fetched data if it's valid
             if raw_df is not None and not raw_df.empty:
                 all_dfs.append(raw_df)
                 total_rows_fetched += len(raw_df)
@@ -499,6 +505,7 @@ if __name__ == "__main__":
             final_analysis_generated=final_rankings_table is not None,
         )
 
+        # Execute AI analysis on the final rankings table
         # if final_rankings_table:
         #     gemini_analysis(final_rankings_table)
 
