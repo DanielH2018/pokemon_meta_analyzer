@@ -4,7 +4,7 @@ import pandas as pd
 from google import genai
 
 from src import config
-from src.logging import add_context, get_logger
+from src.logger_utils import add_context, get_logger
 
 
 def run_power_analysis(df, title="FINAL POWER RANKINGS"):

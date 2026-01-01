@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 
 from src import config
-from src.logging import add_context, get_logger
+from src.logger_utils import add_context, get_logger
 
 # region Data Fetching
 
