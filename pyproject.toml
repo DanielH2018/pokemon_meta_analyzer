@@ -18,16 +18,3 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
-
-[tool.ty]
-# Target Python version
-python-version = "3.10"
-
-# "ty" is strict by default, but you can toggle specific rules.
-# Unlike Mypy's confusing flags, ty uses a rule system like Ruff.
-# For example, to allow implicit optional types (not recommended, but possible):
-# rules = { "implicit-optional" = "allow" }
-
-[tool.ty.check]
-# Similar to 'ignore_missing_imports' in Mypy
-ignore-missing-imports = true

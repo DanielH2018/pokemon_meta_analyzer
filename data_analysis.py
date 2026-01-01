@@ -1,13 +1,13 @@
 """Run Data Analysis on Pokemon TCG Matchup Data."""
 
-import json
-import logging
+import contextvars
 import os
 import time
 from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
+import structlog
 from google import genai
 
 # Constants
@@ -31,63 +31,99 @@ GEMINI_API_KEY = "AIzaSyBggEeoQFMVZj1NwJLnEVwwcNP1DfYylPI"
 # LOGGING SETUP
 # ==============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s\n",
-    datefmt="%Y-%m-%d %H:%M:%S",
+# --- 1. Configuration ---
+# specific processors to make the output look like your JSON example
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer(),  # Render as JSON
+    ],
+    logger_factory=structlog.PrintLoggerFactory(),
 )
 
+_logger_ctx = contextvars.ContextVar("logger_ctx")
 
-class WideEvent:
-    """A simple 'Flight Recorder'.
 
-    It gathers data as the script runs and prints one JSON summary at the end.
-    """
+# --- 2. The Enhanced Context Manager ---
+class LoggingContext:
+    """A context manager for logging script execution details."""
 
-    def __init__(self, script_name):
-        """Initialize a WideEvent instance with a script name.
-
-        Args:
-            script_name: The name of the script being tracked.
-        """
-        self.data = {
-            "script": script_name,
-            "timestamp": time.time(),
-            "status": "success",
-        }
-        self.start_time = time.time()
-
-    def add(self, **kwargs):
-        """Add any info you want to track."""
-        self.data.update(kwargs)
+    def __init__(self, script_name: str, **initial_vars):
+        """Initialize the LoggingContext."""
+        self.script_name = script_name
+        self.initial_vars = initial_vars
+        self.start_time = 0.0
+        self.token = None
 
     def __enter__(self):
         """Enter the context manager."""
-        return self
+        self.start_time = time.time()
 
-    def __exit__(self, exc_type, exc_value, traceback):
-        """Exit the context manager and log the event summary.
+        # Initialize logger with script name and any starting vars
+        logger = structlog.get_logger().bind(
+            script=self.script_name, **self.initial_vars
+        )
 
-        Args:
-            exc_type: The exception type if an exception occurred.
-            exc_value: The exception value if an exception occurred.
-            traceback: The traceback if an exception occurred.
-        """
-        # 1. Calculate how long the script took
+        # Set the context variable
+        self.token = _logger_ctx.set(logger)
+        return logger
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit the context manager and log the summary event."""
+        # 1. Calculate Duration
         duration = (time.time() - self.start_time) * 1000
-        self.data["duration_ms"] = round(duration, 2)
 
-        # 2. If it crashed, capture why
+        # 2. Get the current logger (which includes everything added via add_context!)
+        logger = get_logger()
+
+        # 3. Handle Status & Errors
         if exc_type:
-            self.data["status"] = "failed"
-            self.data["error"] = str(exc_value)
-            self.data["error_type"] = exc_type.__name__
+            status = "failed"
+            # Bind error details to the logger for the final message
+            logger = logger.bind(
+                error=str(exc_val), error_type=exc_type.__name__
+            )
+        else:
+            status = "success"
 
-        # 3. Print the single wide event
-        print(json.dumps(self.data, indent=4))
+        # 4. The "Wide Event" Log
+        logger.info(
+            "flight_recorder_summary",
+            status=status,
+            duration_ms=round(duration, 2),
+        )
 
-        # Allow the crash to actually stop the script (don't suppress it)
+        # Cleanup context
+        if self.token:
+            _logger_ctx.reset(self.token)
+
+        # Return False to let the exception propagate (crash the script)
         return False
+
+
+# --- 3. Helper Functions ---
+
+
+def get_logger() -> structlog.BoundLogger:
+    """Get the current logger."""
+    try:
+        return _logger_ctx.get()
+    except LookupError:
+        return structlog.get_logger()
+
+
+def add_context(**kwargs):
+    """Add context variables to the current logger."""
+    try:
+        # Get current logger
+        current_logger = _logger_ctx.get()
+        # Bind new values
+        new_logger = current_logger.bind(**kwargs)
+        # Update the context variable with the new logger
+        _logger_ctx.set(new_logger)
+    except LookupError:
+        pass  # Or raise warning if used outside context
 
 
 # endregion
@@ -104,20 +140,19 @@ def fetch_matchup_data(
     deck_list: list[str],
     start_date: str,
     end_date: str = datetime.now().strftime("%Y-%m-%d"),
-    event: WideEvent = None,
-) -> pd.DataFrame | None:
+) -> pd.DataFrame:
     """Fetches matchup data from TrainerHill for a given date range.
 
     Args:
         deck_list: List of deck slugs to fetch data for.
         start_date: Start date in YYYY-MM-DD format.
         end_date: End date in YYYY-MM-DD format (default is today).
-        event: Optional WideEvent instance for logging.
 
     Returns:
         A raw pandas DataFrame or None on error.
     """
-    logging.info(f"Calling API to fetch data from {start_date} to {end_date}...")
+    logger = get_logger()
+    logger.info(f"Calling API to fetch data from {start_date} to {end_date}...")
 
     url = "https://www.trainerhill.com/_dash-update-component"
     headers = {
@@ -147,7 +182,11 @@ def fetch_matchup_data(
                 "property": "value",
                 "value": deck_list,
             },
-            {"id": "meta-placing", "property": "value", "value": PLACING_PERCENTAGE},
+            {
+                "id": "meta-placing",
+                "property": "value",
+                "value": PLACING_PERCENTAGE,
+            },
             {
                 "id": "meta-result-rate",
                 "property": "value",
@@ -163,21 +202,23 @@ def fetch_matchup_data(
         response.raise_for_status()
         response_data = response.json()
 
-        matchup_list = response_data["response"]["meta-matchup-data-store"]["data"]
+        matchup_list = response_data["response"]["meta-matchup-data-store"][
+            "data"
+        ]
 
         if isinstance(matchup_list, list) and matchup_list:
-            logging.info("API call successful!")
+            logger.info("API call successful!")
             return pd.DataFrame(matchup_list)
         else:
-            logging.warning("No data returned from API for this period.")
-            return None  # Return empty DataFrame
+            logger.warning("No data returned from API for this period.")
+            return pd.DataFrame()  # Return empty DataFrame
 
     except requests.exceptions.RequestException as e:
-        logging.error(f"An error occurred during API request: {e}")
-        return None
+        logger.error(f"An error occurred during API request: {e}")
+        return pd.DataFrame()
     except KeyError:
-        logging.error("Could not find expected data in API response.")
-        return None
+        logger.error("Could not find expected data in API response.")
+        return pd.DataFrame()
 
 
 def get_deck_slugs(
@@ -187,7 +228,6 @@ def get_deck_slugs(
     platform: str = PLATFORM,
     game: str = GAME,
     division: list[str] = DIVISION,
-    event=None,
 ) -> list[str]:
     """Perform the deck-select POST and return a list of deck titles.
 
@@ -198,12 +238,12 @@ def get_deck_slugs(
         platform: platform filter (default PLATFORM)
         game: game filter (default GAME)
         division: list of divisions, defaults to DIVISION
-        event: Optional WideEvent instance for logging.
 
     Returns:
         A list of deck titles
     """
-    logging.info(f"Calling deck-select API for {start_date} to {end_date})")
+    logger = get_logger()
+    logger.info(f"Calling deck-select API for {start_date} to {end_date})")
 
     url = "https://www.trainerhill.com/_dash-update-component"
     headers = {
@@ -234,7 +274,7 @@ def get_deck_slugs(
         "changedPropIds": [],
         "parsedChangedPropsIds": [],
     }
-    logging.debug(f"Payload: {payload}")
+    logger.debug(f"Payload: {payload}")
 
     op_start = time.time()
     try:
@@ -242,11 +282,10 @@ def get_deck_slugs(
         resp.raise_for_status()
         response_data = resp.json()
 
-        # logging.debug(f"Response: {response_data}")
+        # logger.debug(f"Response: {response_data}")
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error performing deck-select POST: {e}")
-        if event:
-            event.add(deck_slugs_fetch_failed=True, deck_slugs_error=str(e))
+        logger.error(f"Error performing deck-select POST: {e}")
+        add_context(deck_slugs_fetch_failed=True, deck_slugs_error=str(e))
         return []
 
     try:
@@ -265,21 +304,19 @@ def get_deck_slugs(
                 if deck_id is not None:
                     deck_ids.append(deck_id)
         else:
-            logging.warning("Unexpected structure for deck ids; expected list.")
-        logging.debug(f"Deck IDs: {deck_ids}")
+            logger.warning("Unexpected structure for deck ids; expected list.")
+        logger.debug(f"Deck IDs: {deck_ids}")
         op_duration = (time.time() - op_start) * 1000
-        if event:
-            event.add(
-                deck_ids_count=len(deck_ids),
-                deck_ids_fetch_duration_ms=round(op_duration, 2),
-            )
+        add_context(
+            deck_ids_count=len(deck_ids),
+            deck_ids_fetch_duration_ms=round(op_duration, 2),
+        )
 
         return deck_ids
 
     except (KeyError, ValueError) as e:
-        logging.error(f"Could not parse deck-select response: {e}")
-        if event:
-            event.add(deck_slugs_parse_failed=True, deck_slugs_parse_error=str(e))
+        logger.error(f"Could not parse deck-select response: {e}")
+        add_context(deck_slugs_parse_failed=True, deck_slugs_parse_error=str(e))
         return []
 
 
@@ -289,7 +326,6 @@ def get_time_slice_data(
     is_current_time_slice,
     deck_list,
     folder="pokemon_data",
-    event=None,
 ) -> pd.DataFrame:
     """Orchestrates fetching data for a time slice.
 
@@ -301,37 +337,39 @@ def get_time_slice_data(
         is_current_time_slice: Boolean indicating if this is the current time slice.
         deck_list: List of deck slugs to fetch data for.
         folder: Folder to save and load data from.
-        event: Optional WideEvent instance for logging.
 
     Returns:
         A pandas DataFrame containing the fetched or cached data.
     """
+    logger = get_logger()
     filename = f"data_{time_slice_start}_to_{time_slice_end}.csv"
     filepath = os.path.join(folder, filename)
 
     if is_current_time_slice and os.path.exists(filepath):
-        logging.info(
+        logger.info(
             f"Current time slice detected. Removing stale file to re-fetch: {filename}"
         )
         os.remove(filepath)
 
     if os.path.exists(filepath):
-        logging.info(
+        logger.info(
             f"Found local file for past time slice: {filename}. Loading from disk."
         )
         df = pd.read_csv(filepath)
-        if event:
-            event.add(**{f"time_slice_data_{time_slice_start}_from_cache": True})
+        add_context(**{f"time_slice_data_{time_slice_start}_from_cache": True})
         return df
     else:
-        raw_df = fetch_matchup_data(deck_list, time_slice_start, time_slice_end, event)
+        raw_df = fetch_matchup_data(deck_list, time_slice_start, time_slice_end)
         if raw_df is not None and not raw_df.empty:
             raw_df.to_csv(filepath, index=False)
-            logging.info(f"Saved data to {filepath}")
-            if event:
-                event.add(
-                    **{f"time_slice_data_{time_slice_start}_rows_fetched": len(raw_df)}
-                )
+            logger.info(f"Saved data to {filepath}")
+            add_context(
+                **{
+                    f"time_slice_data_{time_slice_start}_rows_fetched": len(
+                        raw_df
+                    )
+                }
+            )
         return raw_df
 
 
@@ -344,7 +382,7 @@ def get_time_slice_data(
 # region Power Ranking Analysis
 
 
-def run_power_analysis(df, title="FINAL POWER RANKINGS", event=None):
+def run_power_analysis(df, title="FINAL POWER RANKINGS"):
     """Executes the iterative power ranking algorithm.
 
     Logs the result and returns the ranking table as a string.
@@ -352,15 +390,14 @@ def run_power_analysis(df, title="FINAL POWER RANKINGS", event=None):
     Args:
         df: A pandas DataFrame containing the matchup data.
         title: Title of the analysis (default is "FINAL POWER RANKINGS").
-        event: Optional WideEvent instance for logging.
 
     Returns:
         A string representation of the power rankings table.
     """
+    logger = get_logger()
     if df.empty:
-        logging.warning(f"Skipping analysis for '{title}' due to no data.")
-        if event:
-            event.add(power_analysis_empty_data=True)
+        logger.warning(f"Skipping analysis for '{title}' due to no data.")
+        add_context(power_analysis_empty_data=True)
         return None  # Return None if no data
 
     all_decks = pd.unique(df[["deck1", "deck2"]].values.ravel("K"))
@@ -382,7 +419,7 @@ def run_power_analysis(df, title="FINAL POWER RANKINGS", event=None):
             power_scores = new_power_scores
             break
         power_scores = new_power_scores / new_power_scores.sum()
-        logging.debug(f"Iteration {i + 1} complete for '{title}'.")
+        logger.debug(f"Iteration {i + 1} complete for '{title}'.")
 
     # --- Final Output ---
     summary_df = pd.DataFrame(index=all_decks)
@@ -391,12 +428,12 @@ def run_power_analysis(df, title="FINAL POWER RANKINGS", event=None):
 
     table_string = summary_df.head(15).to_string()
 
-    logging.info(f"\n{'=' * 50}\n {title}\n{'=' * 50}\n{table_string}")
+    logger.info(f"\n{'=' * 50}\n {title}\n{'=' * 50}\n{table_string}")
 
-    if event:
-        event.add(
-            power_analysis_decks_analyzed=len(all_decks), power_analysis_iterations=20
-        )
+    add_context(
+        power_analysis_decks_analyzed=len(all_decks),
+        power_analysis_iterations=20,
+    )
 
     # Return the table string for external use (like the AI prompt)
     return table_string
@@ -422,6 +459,7 @@ def gemini_analysis(final_rankings_table):
         final_rankings_table: A string containing the formatted power rankings
             table to be analyzed.
     """
+    logger = get_logger()
     try:
         # Configure the Gemini client with the API key from environment variables
         # The client gets the API key from the environment variable `GEMINI_API_KEY`.
@@ -445,16 +483,16 @@ def gemini_analysis(final_rankings_table):
         Provide your analysis now.
         """  # noqa: E501
 
-        logging.info("\n\n{'='*20} 🤖 GEMINI META ANALYSIS 🤖 {'='*20}")
+        logger.info("\n\n{'='*20} 🤖 GEMINI META ANALYSIS 🤖 {'='*20}")
 
         response = client.models.generate_content(
             model="gemini-2.5-pro",
             contents=prompt,
         )
 
-        logging.info(response.text)
+        logger.info(response.text)
     except Exception as e:
-        logging.error(f"\n\nAn error occurred during Gemini analysis: {e}")
+        logger.error(f"\n\nAn error occurred during Gemini analysis: {e}")
 
 
 # endregion
@@ -466,16 +504,16 @@ def gemini_analysis(final_rankings_table):
 # region Main
 
 if __name__ == "__main__":
-    with WideEvent("pokemon_matchup_analysis") as event:
-        event.add(script_name="pokemon_matchup_analysis")
+    with LoggingContext("pokemon_matchup_analysis") as logger:
+        logger.info("Job Started")
         os.makedirs(DATA_FOLDER, exist_ok=True)
 
         # Create Date Time Range
         start_date_dt = START_DATE
         end_date_dt = datetime.now()
 
-        # Add date range to the event for tracking
-        event.add(
+        # Add date range to the context for tracking
+        add_context(
             date_range_start=start_date_dt.strftime("%Y-%m-%d"),
             date_range_end=end_date_dt.strftime("%Y-%m-%d"),
         )
@@ -495,19 +533,20 @@ if __name__ == "__main__":
             time_slice_start_str = time_slice_start_dt.strftime("%Y-%m-%d")
             time_slice_end_str = time_slice_end_dt.strftime("%Y-%m-%d")
 
-            logging.info(
+            logger.info(
                 f"{'=' * 25} PROCESSING TIME: {time_slice_start_str} to "
                 f"{time_slice_end_str} {'=' * 25}"
             )
 
             # Check if the current time slice includes the end date
-            is_ongoing_time = time_slice_start_dt <= end_date_dt <= time_slice_end_dt
+            is_ongoing_time = (
+                time_slice_start_dt <= end_date_dt <= time_slice_end_dt
+            )
 
             # Fetch deck slugs for the current time slice
             deck_list = get_deck_slugs(
                 start_date=time_slice_start_str,
                 end_date=time_slice_end_str,
-                event=event,
             )
 
             # Fetch data for the current time slice
@@ -517,7 +556,6 @@ if __name__ == "__main__":
                 is_ongoing_time,
                 deck_list,
                 DATA_FOLDER,
-                event=event,
             )
 
             # Process the fetched data if it's valid
@@ -532,12 +570,13 @@ if __name__ == "__main__":
                 run_power_analysis(
                     raw_df.copy(),
                     time_slice_label,
-                    event=event,
                 )
 
                 aggregated_df = pd.concat(all_dfs, ignore_index=True)
                 aggregated_df_summed = (
-                    aggregated_df.groupby(["deck1", "deck2"]).sum().reset_index()
+                    aggregated_df.groupby(["deck1", "deck2"])
+                    .sum()
+                    .reset_index()
                 )
 
             time_slice_start_dt += timedelta(days=7)
@@ -546,11 +585,10 @@ if __name__ == "__main__":
         final_rankings_table = run_power_analysis(
             aggregated_df_summed.copy(),
             f"AGGREGATE RANKINGS UP TO: {end_date_dt.strftime('%Y-%m-%d')}",
-            event=event,
         )
 
-        # Add summary metrics to the event
-        event.add(
+        # Add summary metrics to the context
+        add_context(
             time_periods_processed=time_periods_processed,
             total_rows_fetched=total_rows_fetched,
             final_analysis_generated=final_rankings_table is not None,
