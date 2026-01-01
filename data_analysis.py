@@ -33,9 +33,13 @@ GEMINI_API_KEY = "AIzaSyBggEeoQFMVZj1NwJLnEVwwcNP1DfYylPI"
 # LOGGING SETUP
 # ==============================================================================
 
-# --- 1. Context Variable for Logger ---
+# --- 1. Context Variables ---
 
+# This holds the logger used for PRINTING to the console
 _logger_ctx = contextvars.ContextVar("logger_ctx")
+
+# This holds the data accumulating for the FINAL SUMMARY (Hidden from console)
+_flight_data_ctx = contextvars.ContextVar("flight_data_ctx")
 
 
 # --- 2. The Enhanced Context Manager ---
@@ -43,55 +47,67 @@ class LoggingContext:
     """A context manager for logging script execution details."""
 
     def __init__(self, script_name: str, **initial_vars):
-        """Initialize the LoggingContext."""
+        """Initializes the LoggingContext."""
         self.script_name = script_name
         self.initial_vars = initial_vars
         self.start_time = 0.0
-        self.token = None
+        self.token_logger = None
+        self.token_data = None
 
     def __enter__(self):
-        """Enter the context manager."""
+        """Sets up logging context and starts timing."""
         self.start_time = time.time()
 
-        # Initialize logger with script name and any starting vars
-        logger = structlog.get_logger().bind(
-            script=self.script_name, **self.initial_vars
-        )
+        # 1. Initialize the Silent Flight Data
+        # Start with the initial vars (like user_id, job_id)
+        current_data = self.initial_vars.copy()
+        self.token_data = _flight_data_ctx.set(current_data)
 
-        # Set the context variable
-        self.token = _logger_ctx.set(logger)
+        # 2. Initialize the Active Logger
+        # We ONLY bind the script name so the console logs stay clean
+        logger = structlog.get_logger().bind(script=self.script_name)
+        self.token_logger = _logger_ctx.set(logger)
+
         return logger
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Exit the context manager and log the summary event."""
-        # 1. Calculate Duration
         duration = (time.time() - self.start_time) * 1000
 
-        # 2. Get the current logger (which includes everything added via add_context!)
-        logger = get_logger()
+        # 1. Gather all the data into one dictionary
+        final_data = _flight_data_ctx.get()
+        summary_payload = {
+            "status": "failed" if exc_type else "success",
+            "duration_ms": round(duration, 2),
+            **final_data,
+        }
 
-        # 3. Handle Status & Errors
+        # 2. Add Error Details if present
         if exc_type:
-            status = "failed"
-            # Bind error details to the logger for the final message
-            logger = logger.bind(
-                error=str(exc_val), error_type=exc_type.__name__
-            )
-        else:
-            status = "success"
+            summary_payload["error"] = str(exc_val)
+            summary_payload["error_type"] = exc_type.__name__
 
-        # 4. The "Wide Event" Log
-        logger.info(
-            "flight_recorder_summary",
-            status=status,
-            duration_ms=round(duration, 2),
-        )
+        # 3. HUMAN VIEW: If running locally, print a pretty block
+        #    We use json.dumps with indent=4 to make it readable.
+        if sys.stdout.isatty():
+            import json
 
-        # Cleanup context
-        if self.token:
-            _logger_ctx.reset(self.token)
+            print("\n" + "=" * 50)
+            print("FLIGHT RECORDER SUMMARY")
+            print("=" * 50)
+            # default=str handles objects like datetime that JSON can't natively serialize
+            print(json.dumps(summary_payload, indent=4, default=str))
+            print("=" * 50 + "\n")
 
-        # Return False to let the exception propagate (crash the script)
+        # 4. MACHINE RECORD: Log the structured event
+        #    This ensures the data is still searchable/parsable in your logs
+        get_logger().info("flight_recorder_summary", **summary_payload)
+
+        # Cleanup
+        if self.token_logger:
+            _logger_ctx.reset(self.token_logger)
+        if self.token_data:
+            _flight_data_ctx.reset(self.token_data)
+
         return False
 
 
@@ -99,25 +115,18 @@ class LoggingContext:
 
 
 def setup_logging(debug_mode: bool = False):
-    """Setup structlog logging configuration."""
-    # 1. Decide: Pretty or JSON?
+    """Sets up structlog logging configuration."""
     if sys.stdout.isatty():
-        # If running in a terminal, use colors and columns
         renderer = structlog.dev.ConsoleRenderer()
     else:
-        # If running in Docker or piped to a file, use JSON
         renderer = structlog.processors.JSONRenderer()
 
-    # 2. Decide: Debug or Info?
     min_level = logging.DEBUG if debug_mode else logging.INFO
 
     structlog.configure(
         processors=[
-            # Add a timestamp
             structlog.processors.TimeStamper(fmt="iso"),
-            # Add log level (INFO, ERROR)
             structlog.processors.add_log_level,
-            # Perform the rendering we chose above
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(min_level),
@@ -127,7 +136,7 @@ def setup_logging(debug_mode: bool = False):
 
 
 def get_logger() -> structlog.BoundLogger:
-    """Get the current logger."""
+    """Retrieves the current logger from context or creates a new one."""
     try:
         return _logger_ctx.get()
     except LookupError:
@@ -135,16 +144,24 @@ def get_logger() -> structlog.BoundLogger:
 
 
 def add_context(**kwargs):
-    """Add context variables to the current logger."""
+    """Silently adds data to the Flight Recorder.
+
+    This data will NOT appear in console logs, only in the final summary.
+    """
     try:
-        # Get current logger
-        current_logger = _logger_ctx.get()
-        # Bind new values
-        new_logger = current_logger.bind(**kwargs)
-        # Update the context variable with the new logger
-        _logger_ctx.set(new_logger)
+        # Get the current data dictionary
+        current_data = _flight_data_ctx.get()
+
+        # Create a copy to ensure context safety (immutability pattern)
+        new_data = current_data.copy()
+        new_data.update(kwargs)
+
+        # Save it back to the context
+        _flight_data_ctx.set(new_data)
+
     except LookupError:
-        pass  # Or raise warning if used outside context
+        # If called outside the context, we just ignore it (or you could log a warning)
+        pass
 
 
 # endregion
@@ -449,7 +466,7 @@ def run_power_analysis(df, title="FINAL POWER RANKINGS"):
 
     table_string = summary_df.head(15).to_string()
 
-    logger.info(f"\n{'=' * 50}\n {title}\n{'=' * 50}\n{table_string}")
+    logger.info(f"\n{'=' * 50}\n {title}\n{'=' * 50}\n{table_string}\n")
 
     add_context(
         power_analysis_decks_analyzed=len(all_decks),
