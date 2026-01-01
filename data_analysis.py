@@ -1,7 +1,9 @@
 """Run Data Analysis on Pokemon TCG Matchup Data."""
 
 import contextvars
+import logging
 import os
+import sys
 import time
 from datetime import datetime, timedelta
 
@@ -31,16 +33,7 @@ GEMINI_API_KEY = "AIzaSyBggEeoQFMVZj1NwJLnEVwwcNP1DfYylPI"
 # LOGGING SETUP
 # ==============================================================================
 
-# --- 1. Configuration ---
-# specific processors to make the output look like your JSON example
-structlog.configure(
-    processors=[
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.add_log_level,
-        structlog.processors.JSONRenderer(),  # Render as JSON
-    ],
-    logger_factory=structlog.PrintLoggerFactory(),
-)
+# --- 1. Context Variable for Logger ---
 
 _logger_ctx = contextvars.ContextVar("logger_ctx")
 
@@ -103,6 +96,34 @@ class LoggingContext:
 
 
 # --- 3. Helper Functions ---
+
+
+def setup_logging(debug_mode: bool = False):
+    """Setup structlog logging configuration."""
+    # 1. Decide: Pretty or JSON?
+    if sys.stdout.isatty():
+        # If running in a terminal, use colors and columns
+        renderer = structlog.dev.ConsoleRenderer()
+    else:
+        # If running in Docker or piped to a file, use JSON
+        renderer = structlog.processors.JSONRenderer()
+
+    # 2. Decide: Debug or Info?
+    min_level = logging.DEBUG if debug_mode else logging.INFO
+
+    structlog.configure(
+        processors=[
+            # Add a timestamp
+            structlog.processors.TimeStamper(fmt="iso"),
+            # Add log level (INFO, ERROR)
+            structlog.processors.add_log_level,
+            # Perform the rendering we chose above
+            renderer,
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(min_level),
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
 
 
 def get_logger() -> structlog.BoundLogger:
@@ -504,6 +525,7 @@ def gemini_analysis(final_rankings_table):
 # region Main
 
 if __name__ == "__main__":
+    setup_logging(debug_mode=False)
     with LoggingContext("pokemon_matchup_analysis") as logger:
         logger.info("Job Started")
         os.makedirs(DATA_FOLDER, exist_ok=True)
