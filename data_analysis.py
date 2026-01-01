@@ -71,6 +71,7 @@ class LoggingContext:
         return logger
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Finalizes logging context and prints summary."""
         duration = (time.time() - self.start_time) * 1000
 
         # 1. Gather all the data into one dictionary
