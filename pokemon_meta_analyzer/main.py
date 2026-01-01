@@ -9,7 +9,7 @@ import pandas as pd
 from src import config
 from src.analysis import run_power_analysis
 from src.data import get_deck_slugs, get_time_slice_data
-from src.logging import LoggingContext, add_context, setup_logging
+from src.logger_utils import LoggingContext, add_context, setup_logging
 
 
 def main():
