@@ -2,7 +2,8 @@
 
 import os
 import time
-from datetime import datetime
+from collections.abc import Generator
+from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
@@ -10,7 +11,25 @@ import requests
 from src import config
 from src.logger_utils import add_context, get_logger
 
-# region Data Fetching
+
+def generate_weekly_slices(
+    start_dt, end_dt
+) -> Generator[tuple[str, str, bool], None, None]:
+    """Yields (start_str, end_str, is_current_slice) for each week."""
+    current = start_dt
+    while current <= end_dt:
+        slice_end = current + timedelta(days=6)  # 6 days gap = 7 days inclusive
+
+        start_str = current.strftime("%Y-%m-%d")
+        end_str = slice_end.strftime("%Y-%m-%d")
+
+        # Logic: Is "now" inside this slice?
+        is_ongoing = current <= end_dt <= slice_end
+
+        yield start_str, end_str, is_ongoing
+
+        # Move to next week
+        current += timedelta(days=7)
 
 
 def fetch_matchup_data(

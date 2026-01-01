@@ -7,6 +7,16 @@ from src import config
 from src.logger_utils import add_context, get_logger
 
 
+def aggregate_matchup_data(dfs: list[pd.DataFrame]) -> pd.DataFrame:
+    """Combines multiple time slices into one aggregate summary."""
+    if not dfs:
+        return pd.DataFrame()
+
+    aggregated_df = pd.concat(dfs, ignore_index=True)
+    # Group by matchup and sum the wins/totals
+    return aggregated_df.groupby(["deck1", "deck2"]).sum().reset_index()
+
+
 def run_power_analysis(df, title="FINAL POWER RANKINGS"):
     """Executes the iterative power ranking algorithm.
 
