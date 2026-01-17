@@ -4,3 +4,4 @@ temp
 python_sandbox.py
 *.pyc
 __pycache__/
+.env
